@@ -17,7 +17,7 @@ This will create an executable binary called `emp` on Linux/macOS and `emp.exe` 
 
 # Keyboard shortcuts
 - up/down arrows: move selection in the employee list
-- a: add a new employee (step through first name, last name, rate)
+- a: add a new employee
 - d: delete the selected employee
 - i: clock-in the selected employee
 - o: clock-out the selected employee

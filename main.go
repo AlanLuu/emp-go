@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -38,6 +39,7 @@ type Session struct {
 type Employee struct {
 	ID             int
 	FirstName      string
+	MiddleName     string // Optional
 	LastName       string
 	HourlyRate     float64
 	CurrentClockIn *time.Time // Current active clock-in (nil if clocked out)
@@ -57,7 +59,12 @@ func (e *Employee) Title() string {
 	} else {
 		status = STATUS_CLOCKED_OUT
 	}
-	return fmt.Sprintf("%s %s (%s)", e.FirstName, e.LastName, status)
+	name := e.FirstName
+	if e.MiddleName != "" {
+		name += " " + e.MiddleName
+	}
+	name += " " + e.LastName
+	return fmt.Sprintf("%s (%s)", name, status)
 }
 
 func (e *Employee) Description() string {
@@ -105,6 +112,7 @@ type addField int
 
 const (
 	fieldFirstName addField = iota
+	fieldMiddleName
 	fieldLastName
 	fieldRate
 )
@@ -148,6 +156,7 @@ type model struct {
 	mode             mode
 	field            addField
 	firstName        textinput.Model
+	middleName       textinput.Model
 	lastName         textinput.Model
 	rate             textinput.Model
 	selectedEmpIdx   int // Index of employee whose sessions we're viewing
@@ -189,6 +198,10 @@ func newModel() *model {
 	fn.Prompt = "> "
 	fn.Focus()
 
+	mn := textinput.New()
+	mn.Placeholder = "Middle name"
+	mn.Prompt = "> "
+
 	ln := textinput.New()
 	ln.Placeholder = "Last name"
 	ln.Prompt = "> "
@@ -217,6 +230,7 @@ func newModel() *model {
 		mode:             modeList,
 		field:            fieldFirstName,
 		firstName:        fn,
+		middleName:       mn,
 		lastName:         ln,
 		rate:             rate,
 		selectedEmpIdx:   -1,
@@ -243,9 +257,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = modeAdd
 				m.field = fieldFirstName
 				m.firstName.SetValue("")
+				m.middleName.SetValue("")
 				m.lastName.SetValue("")
 				m.rate.SetValue("")
 				m.firstName.Focus()
+				m.middleName.Blur()
 				m.lastName.Blur()
 				m.rate.Blur()
 				return m, nil
@@ -305,8 +321,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter", "tab":
 				switch m.field {
 				case fieldFirstName:
-					m.field = fieldLastName
+					m.field = fieldMiddleName
 					m.firstName.Blur()
+					m.middleName.Focus()
+				case fieldMiddleName:
+					m.field = fieldLastName
+					m.middleName.Blur()
 					m.lastName.Focus()
 				case fieldLastName:
 					m.field = fieldRate
@@ -328,8 +348,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.rate.Blur()
 					m.lastName.Focus()
 				case fieldLastName:
-					m.field = fieldFirstName
+					m.field = fieldMiddleName
 					m.lastName.Blur()
+					m.middleName.Focus()
+				case fieldMiddleName:
+					m.field = fieldFirstName
+					m.middleName.Blur()
 					m.firstName.Focus()
 				}
 				return m, nil
@@ -338,6 +362,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case fieldFirstName:
 					var cmd tea.Cmd
 					m.firstName, cmd = m.firstName.Update(msg)
+					cmds = append(cmds, cmd)
+				case fieldMiddleName:
+					var cmd tea.Cmd
+					m.middleName, cmd = m.middleName.Update(msg)
 					cmds = append(cmds, cmd)
 				case fieldLastName:
 					var cmd tea.Cmd
@@ -361,19 +389,31 @@ func (m *model) syncList() {
 
 func (m *model) addEmployeeFromInputs() error {
 	firstName := strings.TrimSpace(m.firstName.Value())
+	middleName := strings.TrimSpace(m.middleName.Value())
 	lastName := strings.TrimSpace(m.lastName.Value())
 	value := strings.TrimSpace(m.rate.Value())
 	if firstName == "" || lastName == "" || value == "" {
-		return fmt.Errorf("All fields are required.")
+		errStr := ""
+		if firstName == "" {
+			errStr += "\nMissing first name"
+		}
+		if lastName == "" {
+			errStr += "\nMissing last name"
+		}
+		if value == "" {
+			errStr += "\nMissing hourly rate"
+		}
+		return errors.New(errStr[1:])
 	}
 	rate, err := strconv.ParseFloat(value, 64)
 	if err != nil {
-		return fmt.Errorf("Hourly rate must be a numeric value.")
+		return errors.New("Hourly rate must be a numeric value.")
 	}
 
 	e := &Employee{
 		ID:         m.nextID,
 		FirstName:  firstName,
+		MiddleName: middleName,
 		LastName:   lastName,
 		HourlyRate: rate,
 	}
@@ -394,9 +434,9 @@ func (m *model) getSelectedIndex() int {
 	return idx
 }
 
-func (m *model) deleteSelected() {
-	m.deleteByIndex(m.getSelectedIndex())
-}
+// func (m *model) deleteSelected() {
+// 	m.deleteByIndex(m.getSelectedIndex())
+// }
 
 func (m *model) deleteByIndex(idx int) {
 	if idx < 0 || idx >= len(m.employees) {
@@ -416,7 +456,7 @@ func (m *model) clockInSelected() {
 	case *Employee:
 		// If already clocked in, show error
 		if e.CurrentClockIn != nil {
-			m.err = fmt.Errorf("Employee is already clocked in.")
+			m.err = errors.New("Employee is already clocked in.")
 			return
 		}
 		e.CurrentClockIn = &now
@@ -432,7 +472,7 @@ func (m *model) clockOutSelected() {
 	switch e := m.employees[idx].(type) {
 	case *Employee:
 		if e.CurrentClockIn == nil {
-			m.err = fmt.Errorf("Employee is not clocked in yet.")
+			m.err = errors.New("Employee is not clocked in yet.")
 			return
 		}
 		now := time.Now()
@@ -450,10 +490,14 @@ func (m *model) clockOutSelected() {
 		// Clear current clock-in
 		e.CurrentClockIn = nil
 
+		name := e.FirstName
+		if e.MiddleName != "" {
+			name += " " + e.MiddleName
+		}
+		name += " " + e.LastName
 		m.lastWageMessage = fmt.Sprintf(
-			"%s %s clocked out — Session wage: $%.2f",
-			e.FirstName,
-			e.LastName,
+			"%s clocked out — Session wage: $%.2f",
+			name,
 			wage,
 		)
 	}
@@ -463,7 +507,7 @@ func (m *model) clockOutSelected() {
 func (m *model) viewSessions() {
 	idx := m.getSelectedIndex()
 	if idx < 0 {
-		m.err = fmt.Errorf("No employee selected.")
+		m.err = errors.New("No employee selected.")
 		return
 	}
 
@@ -504,9 +548,11 @@ func (m *model) View() string {
 	case modeAdd:
 		var builder strings.Builder
 		builder.WriteString(titleStyle.Render("Add Employee") + "\n\n")
-		builder.WriteString("First name:\n" + m.firstName.View() + "\n\n")
-		builder.WriteString("Last name:\n" + m.lastName.View() + "\n\n")
-		builder.WriteString("Hourly rate:\n" + m.rate.View() + "\n\n")
+		builder.WriteString("First name*:\n" + m.firstName.View() + "\n\n")
+		builder.WriteString("Middle name:\n" + m.middleName.View() + "\n\n")
+		builder.WriteString("Last name*:\n" + m.lastName.View() + "\n\n")
+		builder.WriteString("Hourly rate*:\n" + m.rate.View() + "\n\n")
+		builder.WriteString("* = required field" + "\n\n")
 		builder.WriteString(
 			helpStyle.Render(
 				"[enter/tab] next [shift+tab] previous [esc] cancel",
@@ -522,13 +568,14 @@ func (m *model) View() string {
 		if m.selectedEmpIdx >= 0 && m.selectedEmpIdx < len(m.employees) {
 			switch e := m.employees[m.selectedEmpIdx].(type) {
 			case *Employee:
+				name := e.FirstName
+				if e.MiddleName != "" {
+					name += " " + e.MiddleName
+				}
+				name += " " + e.LastName
 				builder.WriteString(
 					titleStyle.Render(
-						fmt.Sprintf(
-							"Session History: %s %s",
-							e.FirstName,
-							e.LastName,
-						),
+						fmt.Sprintf("Session History: %s", name),
 					) + "\n",
 				)
 				fmt.Fprintf(
@@ -550,7 +597,11 @@ func (m *model) View() string {
 		if m.pendingDeleteIdx >= 0 && m.pendingDeleteIdx < len(m.employees) {
 			switch e := m.employees[m.pendingDeleteIdx].(type) {
 			case *Employee:
-				name = e.FirstName + " " + e.LastName
+				name = e.FirstName
+				if e.MiddleName != "" {
+					name += " " + e.MiddleName
+				}
+				name += " " + e.LastName
 			}
 		}
 		if name == "" {
