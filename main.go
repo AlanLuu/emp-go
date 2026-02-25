@@ -106,6 +106,7 @@ const (
 	modeAdd
 	modeViewSessions
 	modeConfirmDelete
+	modeConfirmDeleteSession
 )
 
 type addField int
@@ -161,6 +162,8 @@ type model struct {
 	rate             textinput.Model
 	selectedEmpIdx   int // Index of employee whose sessions we're viewing
 	pendingDeleteIdx int // Index of employee to delete when in modeConfirmDelete (-1 otherwise)
+
+	pendingSessionDeleteIdx int // Index of session to delete when in modeConfirmDeleteSession (-1 otherwise)
 
 	lastWageMessage string
 
@@ -223,18 +226,19 @@ func newModel() *model {
 	sessionList.SetShowHelp(false)
 
 	return &model{
-		employees:        []list.Item{},
-		nextID:           STARTING_EMPLOYEE_ID,
-		list:             l,
-		sessionList:      sessionList,
-		mode:             modeList,
-		field:            fieldFirstName,
-		firstName:        fn,
-		middleName:       mn,
-		lastName:         ln,
-		rate:             rate,
-		selectedEmpIdx:   -1,
-		pendingDeleteIdx: -1,
+		employees:               []list.Item{},
+		nextID:                  STARTING_EMPLOYEE_ID,
+		list:                    l,
+		sessionList:             sessionList,
+		mode:                    modeList,
+		field:                   fieldFirstName,
+		firstName:               fn,
+		middleName:              mn,
+		lastName:                ln,
+		rate:                    rate,
+		selectedEmpIdx:          -1,
+		pendingDeleteIdx:        -1,
+		pendingSessionDeleteIdx: -1,
 	}
 }
 
@@ -290,6 +294,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case modeViewSessions:
 			switch msg.String() {
+			case "d":
+				if m.selectedEmpIdx >= 0 && m.selectedEmpIdx < len(m.employees) {
+					if e, ok := m.employees[m.selectedEmpIdx].(*Employee); ok && len(e.Sessions) > 0 {
+						sessionIdx := m.sessionList.Index()
+						if sessionIdx >= 0 && sessionIdx < len(e.Sessions) {
+							// session list shows most recent first, so reverse index
+							m.pendingSessionDeleteIdx = len(e.Sessions) - 1 - sessionIdx
+							m.mode = modeConfirmDeleteSession
+						}
+					}
+				}
+				return m, nil
 			case "esc", "q":
 				m.mode = modeList
 				return m, nil
@@ -310,6 +326,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n", "esc":
 				m.pendingDeleteIdx = -1
 				m.mode = modeList
+				return m, nil
+			}
+
+		case modeConfirmDeleteSession:
+			switch msg.String() {
+			case "y", "enter":
+				if m.selectedEmpIdx >= 0 {
+					m.deleteSessionByIndex(m.selectedEmpIdx, m.pendingSessionDeleteIdx)
+				}
+				m.pendingSessionDeleteIdx = -1
+				m.mode = modeViewSessions
+				return m, nil
+			case "n", "esc":
+				m.pendingSessionDeleteIdx = -1
+				m.mode = modeViewSessions
 				return m, nil
 			}
 
@@ -444,6 +475,27 @@ func (m *model) deleteByIndex(idx int) {
 	}
 	m.employees = append(m.employees[:idx], m.employees[idx+1:]...)
 	m.syncList()
+}
+
+func (m *model) deleteSessionByIndex(empIdx, sessionIdx int) {
+	if sessionIdx < 0 || empIdx < 0 || empIdx >= len(m.employees) {
+		return
+	}
+	e, ok := m.employees[empIdx].(*Employee)
+	if !ok || sessionIdx >= len(e.Sessions) {
+		return
+	}
+	e.Sessions = append(e.Sessions[:sessionIdx], e.Sessions[sessionIdx+1:]...)
+
+	// Rebuild the session list view (most recent first)
+	items := make([]list.Item, len(e.Sessions))
+	for i, session := range e.Sessions {
+		items[len(e.Sessions)-1-i] = &SessionItem{
+			Session:    session,
+			SessionNum: len(e.Sessions) - i,
+		}
+	}
+	m.sessionList.SetItems(items)
 }
 
 func (m *model) clockInSelected() {
@@ -589,7 +641,7 @@ func (m *model) View() string {
 			}
 		}
 		builder.WriteString(m.sessionList.View())
-		builder.WriteString("\n" + helpStyle.Render("[esc/q] back"))
+		builder.WriteString("\n" + helpStyle.Render("[d] delete session  [esc/q] back"))
 		return builder.String() + "\n"
 
 	case modeConfirmDelete:
@@ -609,6 +661,41 @@ func (m *model) View() string {
 		}
 		prompt := fmt.Sprintf("Delete %s? (y/n)", name)
 		return confirmStyle.Render("Confirm Delete") + "\n\n" +
+			prompt + "\n\n" +
+			helpStyle.Render("[y/enter] yes  [n/esc] no") + "\n"
+
+	case modeConfirmDeleteSession:
+		var empName string
+		var sessionDesc string
+
+		if m.selectedEmpIdx >= 0 && m.selectedEmpIdx < len(m.employees) {
+			if e, ok := m.employees[m.selectedEmpIdx].(*Employee); ok {
+				empName = e.FirstName
+				if e.MiddleName != "" {
+					empName += " " + e.MiddleName
+				}
+				empName += " " + e.LastName
+
+				if m.pendingSessionDeleteIdx >= 0 && m.pendingSessionDeleteIdx < len(e.Sessions) {
+					s := e.Sessions[m.pendingSessionDeleteIdx]
+					sessionDesc = fmt.Sprintf(
+						"%s - %s",
+						s.ClockInAt.Format(TIME_FORMAT),
+						s.ClockOutAt.Format(TIME_FORMAT),
+					)
+				}
+			}
+		}
+
+		if empName == "" {
+			empName = "selected employee"
+		}
+		if sessionDesc == "" {
+			sessionDesc = "this session"
+		}
+
+		prompt := fmt.Sprintf("Delete session %s for %s? (y/n)", sessionDesc, empName)
+		return confirmStyle.Render("Confirm Delete Session") + "\n\n" +
 			prompt + "\n\n" +
 			helpStyle.Render("[y/enter] yes  [n/esc] no") + "\n"
 	}
