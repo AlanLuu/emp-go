@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -16,9 +17,10 @@ import (
 )
 
 const (
-	TERM_WIDTH  = 100
-	TERM_HEIGHT = 14
-	TIME_FORMAT = "01/02/06 " + time.Kitchen
+	TERM_WIDTH        = 100
+	TERM_HEIGHT       = 14
+	TIME_FORMAT       = "01/02/2006 " + time.Kitchen
+	TIME_FORMAT_INPUT = TIME_FORMAT
 
 	STATUS_IDLE        = "idle"
 	STATUS_CLOCKED_IN  = "clocked in"
@@ -105,6 +107,7 @@ const (
 	modeList mode = iota
 	modeAdd
 	modeViewSessions
+	modeAddSession
 	modeConfirmDelete
 	modeConfirmDeleteSession
 )
@@ -116,6 +119,13 @@ const (
 	fieldMiddleName
 	fieldLastName
 	fieldRate
+)
+
+type addSessionField int
+
+const (
+	fieldSessionTimeIn addSessionField = iota
+	fieldSessionTimeOut
 )
 
 var _ tea.Model = (*model)(nil)
@@ -165,6 +175,11 @@ type model struct {
 
 	pendingSessionDeleteIdx int // Index of session to delete when in modeConfirmDeleteSession (-1 otherwise)
 
+	// Manual add session form (used in modeAddSession)
+	sessionTimeIn   textinput.Model
+	sessionTimeOut  textinput.Model
+	addSessionField addSessionField
+
 	lastWageMessage string
 
 	err error
@@ -213,6 +228,20 @@ func newModel() *model {
 	rate.Placeholder = "Hourly rate (e.g. 25.50)"
 	rate.Prompt = "> "
 
+	sessionTimeIn := textinput.New()
+	sessionTimeIn.Placeholder = fmt.Sprintf(
+		"e.g. %s",
+		TIME_FORMAT_INPUT,
+	)
+	sessionTimeIn.Prompt = "> "
+
+	sessionTimeOut := textinput.New()
+	sessionTimeOut.Placeholder = fmt.Sprintf(
+		"e.g. %s",
+		TIME_FORMAT_INPUT,
+	)
+	sessionTimeOut.Prompt = "> "
+
 	sessionItems := []list.Item{}
 	sessionList := list.New(
 		sessionItems,
@@ -239,6 +268,9 @@ func newModel() *model {
 		selectedEmpIdx:          -1,
 		pendingDeleteIdx:        -1,
 		pendingSessionDeleteIdx: -1,
+		sessionTimeIn:           sessionTimeIn,
+		sessionTimeOut:          sessionTimeOut,
+		addSessionField:         fieldSessionTimeIn,
 	}
 }
 
@@ -294,6 +326,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case modeViewSessions:
 			switch msg.String() {
+			case "a":
+				m.addSessionField = fieldSessionTimeIn
+				m.sessionTimeIn.SetValue("")
+				m.sessionTimeOut.SetValue("")
+				m.sessionTimeIn.Focus()
+				m.sessionTimeOut.Blur()
+				m.err = nil
+				m.mode = modeAddSession
+				return m, nil
 			case "d":
 				if m.selectedEmpIdx >= 0 && m.selectedEmpIdx < len(m.employees) {
 					if e, ok := m.employees[m.selectedEmpIdx].(*Employee); ok && len(e.Sessions) > 0 {
@@ -342,6 +383,47 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingSessionDeleteIdx = -1
 				m.mode = modeViewSessions
 				return m, nil
+			}
+
+		case modeAddSession:
+			switch msg.String() {
+			case "esc":
+				m.mode = modeViewSessions
+				return m, nil
+			case "enter", "tab":
+				switch m.addSessionField {
+				case fieldSessionTimeIn:
+					m.addSessionField = fieldSessionTimeOut
+					m.sessionTimeIn.Blur()
+					m.sessionTimeOut.Focus()
+				case fieldSessionTimeOut:
+					if err := m.addManualSession(); err != nil {
+						m.err = err
+					} else {
+						m.mode = modeViewSessions
+						m.err = nil
+					}
+				}
+				return m, nil
+			case "shift+tab":
+				switch m.addSessionField {
+				case fieldSessionTimeOut:
+					m.addSessionField = fieldSessionTimeIn
+					m.sessionTimeOut.Blur()
+					m.sessionTimeIn.Focus()
+				}
+				return m, nil
+			default:
+				switch m.addSessionField {
+				case fieldSessionTimeIn:
+					var cmd tea.Cmd
+					m.sessionTimeIn, cmd = m.sessionTimeIn.Update(msg)
+					cmds = append(cmds, cmd)
+				case fieldSessionTimeOut:
+					var cmd tea.Cmd
+					m.sessionTimeOut, cmd = m.sessionTimeOut.Update(msg)
+					cmds = append(cmds, cmd)
+				}
 			}
 
 		case modeAdd:
@@ -498,6 +580,92 @@ func (m *model) deleteSessionByIndex(empIdx, sessionIdx int) {
 	m.sessionList.SetItems(items)
 }
 
+func (m *model) addManualSession() error {
+	if m.selectedEmpIdx < 0 || m.selectedEmpIdx >= len(m.employees) {
+		return errors.New("no employee selected")
+	}
+	e, ok := m.employees[m.selectedEmpIdx].(*Employee)
+	if !ok {
+		return errors.New("invalid employee")
+	}
+
+	inStr := strings.TrimSpace(m.sessionTimeIn.Value())
+	outStr := strings.TrimSpace(m.sessionTimeOut.Value())
+	if inStr == "" || outStr == "" {
+		return errors.New("time-in and time-out are required")
+	}
+
+	// Append leading 0 to single-digit month or day
+	for i1, s1 := range []string{inStr, outStr} {
+		if split := strings.Split(s1, "/"); len(split) > 1 {
+			join := false
+			for i2, s2 := range split {
+				if i2 >= 2 {
+					break
+				}
+				if s2 == "" {
+					continue
+				}
+				isDigit := true
+				runeCountInStr := 0
+				for _, c := range s2 {
+					runeCountInStr++
+					if runeCountInStr > 1 || !unicode.IsDigit(c) {
+						isDigit = false
+						break
+					}
+				}
+				if isDigit {
+					split[i2] = "0" + s2
+					join = true
+				}
+			}
+			if join {
+				switch i1 {
+				case 0:
+					inStr = strings.Join(split, "/")
+				case 1:
+					outStr = strings.Join(split, "/")
+				}
+			}
+		}
+	}
+
+	const format = TIME_FORMAT_INPUT
+	clockIn, err := time.Parse(format, inStr)
+	if err != nil {
+		return fmt.Errorf("invalid time-in: use format %s", format)
+	}
+	clockOut, err := time.Parse(format, outStr)
+	if err != nil {
+		return fmt.Errorf("invalid time-out: use format %s", format)
+	}
+
+	if !clockOut.After(clockIn) {
+		return errors.New("time-out must be after time-in")
+	}
+
+	hours := clockOut.Sub(clockIn).Hours()
+	wage := hours * e.HourlyRate
+	session := Session{
+		ClockInAt:  clockIn,
+		ClockOutAt: clockOut,
+		Wage:       wage,
+	}
+	e.Sessions = append(e.Sessions, session)
+
+	// Rebuild the session list view (most recent first)
+	items := make([]list.Item, len(e.Sessions))
+	for i, s := range e.Sessions {
+		items[len(e.Sessions)-1-i] = &SessionItem{
+			Session:    s,
+			SessionNum: len(e.Sessions) - i,
+		}
+	}
+	m.sessionList.SetItems(items)
+	return nil
+}
+
 func (m *model) clockInSelected() {
 	idx := m.getSelectedIndex()
 	if idx < 0 {
@@ -641,7 +809,54 @@ func (m *model) View() string {
 			}
 		}
 		builder.WriteString(m.sessionList.View())
-		builder.WriteString("\n" + helpStyle.Render("[d] delete session  [esc/q] back"))
+		builder.WriteString(
+			"\n" +
+				helpStyle.Render(
+					"[a] add session  [d] delete session  [esc/q] back",
+				),
+		)
+		return builder.String() + "\n"
+
+	case modeAddSession:
+		var builder strings.Builder
+		builder.WriteString(
+			titleStyle.Render("Add Manual Session") + "\n\n",
+		)
+		if m.selectedEmpIdx >= 0 && m.selectedEmpIdx < len(m.employees) {
+			if e, ok := m.employees[m.selectedEmpIdx].(*Employee); ok {
+				name := e.FirstName
+				if e.MiddleName != "" {
+					name += " " + e.MiddleName
+				}
+				name += " " + e.LastName
+				fmt.Fprintf(
+					&builder,
+					"Employee: %s ($%.2f/hr)\n\n",
+					name,
+					e.HourlyRate,
+				)
+			}
+		}
+		fmt.Fprintf(
+			&builder,
+			"Time-in* (e.g. %s):\n",
+			TIME_FORMAT_INPUT,
+		)
+		builder.WriteString(m.sessionTimeIn.View() + "\n\n")
+		fmt.Fprintf(
+			&builder,
+			"Time-out* (e.g. %s):\n",
+			TIME_FORMAT_INPUT,
+		)
+		builder.WriteString(m.sessionTimeOut.View() + "\n\n")
+		builder.WriteString(
+			helpStyle.Render(
+				"[enter/tab] next/save  [shift+tab] previous  [esc] cancel",
+			),
+		)
+		if m.err != nil {
+			builder.WriteString("\n" + errStyle.Render(m.err.Error()))
+		}
 		return builder.String() + "\n"
 
 	case modeConfirmDelete:

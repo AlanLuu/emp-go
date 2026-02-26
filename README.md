@@ -22,7 +22,8 @@ This will create an executable binary called `emp` on Linux/macOS and `emp.exe` 
 - i: clock-in the selected employee
 - o: clock-out the selected employee
 - v: view all clock-ins and clock-outs of the selected employee
-    - d: delete employee sessions
+    - a: add employee session
+    - d: delete employee session
 - q or Ctrl+C: quit
 
 # License
